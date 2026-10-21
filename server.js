@@ -6,7 +6,7 @@ app.use(express.json());
 const VERIFY_TOKEN=process.env.VERIFY_TOKEN || 'tattoo_verify_1545908834';
 const PHONE_NUMBER_ID=process.env.PHONE_NUMBER_ID || '640229565752070';
 const VERSION=process.env.VERSION || 'v19.0';
-const OWNER_NUMBER = "972525466304"; // המספר הפרטי שלך לקבל התראות
+const OWNER_NUMBER = "972525466304";
 
 const clients = {};
 
@@ -16,15 +16,15 @@ async function send(to, data){
     {headers:{Authorization:`Bearer ${process.env.WHATSAPP_TOKEN}`}});
 }
 
-function mainMenu(to){
+function openingMenu(to){
   return send(to, {
     type:'interactive',
     interactive:{
       type:'button',
-      body:{text:'היי! 🔥 ברוך הבא ל-Tattoo Studio!\n\nספר לי, אתה אצלנו...'},
+      body:{text:'שלום הגעתם לגמ"ח המרכזי להסרת קעקועים 👋\n\nהאם אתה מטופל אצלנו?'},
       action:{buttons:[
-        {type:'reply', reply:{id:'new_client', title:'🆕 לקוח חדש'}},
-        {type:'reply', reply:{id:'old_client', title:'❤️ לקוח ותיק'}},
+        {type:'reply', reply:{id:'existing', title:'✅ כן, מטופל'}},
+        {type:'reply', reply:{id:'not_existing', title:'❌ לא מטופל'}},
       ]}
     }
   });
@@ -41,45 +41,82 @@ app.post('/webhook',async(req,res)=>{
     const msg=value?.messages?.[0];
     if(!msg){ return res.sendStatus(200); }
     const from=msg.from;
-    const text=msg.text?.body?.toLowerCase() || '';
-    const btn=msg.interactive?.button_reply?.id || '';
+    const text=msg.text?.body || '';
+    const lower=text.toLowerCase();
+    const btn=msg.interactive?.button_reply?.id || msg.interactive?.list_reply?.id || '';
 
-    // שלח לך התראה לפרטי על כל לקוח
-    if(from !== OWNER_NUMBER){
-      try{
-        await send(OWNER_NUMBER, {type:'text', text:{body:`🔔 לקוח: ${from}\nאמר: ${text || btn}`}});
-      }catch(e){}
+    console.log(`From ${from}: text=${text} btn=${btn}`);
+
+    if(from !== OWNER_NUMBER && (text || btn)){
+      try{ await send(OWNER_NUMBER, {type:'text', text:{body:`🔔 לקוח: ${from}\nכתב: ${text || btn}`}}); }catch(e){}
     }
 
-    if(text.includes('היי')||text.includes('שלום')||text.includes('הלו')||text===''){
-      await mainMenu(from);
+    if(lower.includes('שלום')||lower.includes('היי')||lower.includes('הלו')||lower.includes('hi')||lower.includes('hey')){
+      await openingMenu(from);
     }
-    else if(btn==='new_client'){
-      await send(from,{type:'interactive',interactive:{type:'button',body:{text:'איזה כיף שבאת! 🥳\nמה בא לך לעשות?'},action:{buttons:[{type:'reply', reply:{id:'new_tattoo', title:'✒️ קעקוע חדש'}},{type:'reply', reply:{id:'remove_tattoo', title:'❌ הסרת קעקוע'}},{type:'reply', reply:{id:'consult', title:'💬 ייעוץ'}},]}}});
+    else if(btn==='not_existing'){
+      await send(from,{
+        type:'interactive',
+        interactive:{
+          type:'button',
+          body:{text:'האם אתה רוצה להסיר קעקוע?'},
+          action:{buttons:[
+            {type:'reply', reply:{id:'want_remove', title:'✒️ כן, להסיר'}},
+            {type:'reply', reply:{id:'talk_asa', title:'👨‍⚕️ לדבר עם אסא'}},
+          ]}
+        }
+      });
     }
-    else if(btn==='remove_tattoo'){
-      await send(from,{type:'text', text:{body:'להסרת קעקוע אנחנו צריכים לראות תמונה 📸\n\nשלח לי עכשיו תמונה של הקעקוע + איפה בגוף, ואחזור אליך עם מחיר ומספר טיפולים משוער!'}});
+    else if(btn==='want_remove'){
+      await send(from,{type:'text', text:{body:'מעולה! 👍\n\nתשלח בבקשה תמונות של הקעקועים לפה ואני אתן לך את כל הפרטים - מחיר, מספר טיפולים וכל מה שצריך לדעת! 📸'}});
     }
-    else if(btn==='new_tattoo'){
-      await send(from,{type:'text', text:{body:'🔥 אש! \nשלח לי:\n1. תמונה / סקיצה\n2. איפה בגוף\n3. גודל בערך\n\nואכין לך הצעת מחיר! ❤️'}});
+    else if(btn==='existing'){
+      await send(from,{
+        type:'interactive',
+        interactive:{
+          type:'list',
+          body:{text:'ברוך הבא! ❤️ איזה כיף שחזרת אלינו\n\nבמה אפשר לעזור?'},
+          action:{
+            button:'בחר אפשרות',
+            sections:[{
+              title:'תפריט מטופלים',
+              rows:[
+                {id:'set_appointment', title:'🗓️ לקבוע תור', description:'קביעת תור לטיפול'},
+                {id:'hours', title:'⏰ שעות פעילות', description:'מתי פתוח'},
+                {id:'address', title:'📍 כתובת', description:'איפה אנחנו'},
+                {id:'instructions', title:'📋 הוראות הכנה', description:'איך להתכונן'},
+                {id:'technology', title:'💡 הטכנולוגיה', description:'באיזו טכנולוגיה משתמשים'},
+                {id:'talk_asa', title:'👨‍⚕️ לדבר עם אסא', description:'מעבר לנציג'},
+              ]
+            }]
+          }
+        }
+      });
     }
-    else if(btn==='old_client'){
-      await send(from,{type:'interactive',interactive:{type:'button',body:{text:'איזה כיף שחזרת! ❤️\nאיך אפשר לעזור?'},action:{buttons:[{type:'reply', reply:{id:'old_treatment', title:'🩹 הגעה לטיפול'}},{type:'reply', reply:{id:'old_address', title:'📍 הכתובת'}},{type:'reply', reply:{id:'old_human', title:'👨‍🎨 דבר עם נציג'}},]}}});
+    else if(btn==='set_appointment'){
+      await send(from,{type:'text', text:{body:'בטח! 🗓️\n\nלמתי תרצה לקבוע תור?\nתכתוב לי יום ושעה שנוחים לך ואקבע לך מיד!'}});
     }
-    else if(btn==='old_treatment'){
-      await send(from,{type:'text', text:{body:'כמובן! 🗓️\nכתוב לי מתי נוח לך להגיע ואיזה קעקוע, ואקבע לך תור!'}});
+    else if(btn==='hours'){
+      await send(from,{type:'text', text:{body:'⏰ שעות הפעילות שלנו:\n\nכל יום בין 16:00-19:00\nיום שישי 10:00-12:00\n\nמחכים לך! ❤️'}});
     }
-    else if(btn==='old_address'){
-      await send(from,{type:'text', text:{body:'📍 הרצל 123 תל אביב\nא-ה 10:00-20:00, ו 10:00-15:00\nחניה חינם! 🅿️'}});
+    else if(btn==='address'){
+      await send(from,{type:'text', text:{body:'📍 הכתובת שלנו:\n\nהטורים 5 קומה 2 משפחת פז, ירושלים\n\nחניה בבניין! 🅿️'}});
     }
-    else if(btn==='old_human' || btn==='consult' || text.includes('נציג')){
-      await send(from,{type:'text', text:{body:'מעביר אותך לנציג... 👨‍🎨\nהבוט מושתק לשעה, תכתוב חופשי!'}});
+    else if(btn==='instructions'){
+      await send(from,{type:'text', text:{body:'📋 הוראות הכנת הקעקוע לפני הטיפול:\n\nhttps://tattoos-off.co.il/%d7%94%d7%9b%d7%a0%d7%aa-%d7%94%d7%a7%d7%a2%d7%a7%d7%95%d7%a2-%d7%9c%d7%98%d7%99%d7%a4%d7%95%d7%9c-%d7%9c%d7%99%d7%99%d7%96%d7%a8/?preview=true\n\nחשוב לקרוא לפני שמגיעים! 👆'}});
+    }
+    else if(btn==='technology'){
+      await send(from,{type:'text', text:{body:'💡 הטכנולוגיה שלנו להסרת קעקועים:\n\nhttps://tattoos-off.co.il/%d7%98%d7%9b%d7%a0%d7%95%d7%9c%d7%95%d7%92%d7%99%d7%aa-%d7%94%d7%a1%d7%a8%d7%aa-%d7%a7%d7%a2%d7%a7%d7%95%d7%a2%d7%99%d7%9d/\n\nהטכנולוגיה הכי מתקדמת ובטוחה בעולם! 👆'}});
+    }
+    else if(btn==='talk_asa'){
+      await send(from,{type:'text', text:{body:'מעביר אותך לאסא... 👨‍⚕️\n\nהבוט מושתק לשעה, תכתוב חופשי ואסא יענה לך כאן מיד!\n\n(תוכל לכתוב "שלום" כדי להחזיר את הבוט)'}});
       clients[from]={pausedUntil: Date.now() + 60*60*1000};
     }
     else {
       if(clients[from] && clients[from].pausedUntil > Date.now()){}
-      else { await mainMenu(from); }
+      else { await openingMenu(from); }
     }
+
     res.sendStatus(200);
   }catch(e){
     console.log("ERROR:", JSON.stringify(e.response?.data || e.message, null, 2));
