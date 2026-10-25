@@ -3,6 +3,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const fs = require('fs');
 const { SYSTEM, T, BIZ } = require('./knowledge');
+const { isActive, normNum } = require('./utils');
 
 // ---------- הגדרות ----------
 const {
@@ -14,7 +15,15 @@ const {
   ANTHROPIC_API_KEY,
   ANTHROPIC_MODEL = 'claude-haiku-5-5',
   PORT = 3000,
+  IGNORE_NUMBERS = '',     // מספרים שהבוט מתעלם מהם (אנשי קשר), מופרדים בפסיק
+  TEST_NUMBERS = '',       // מספרים לבדיקה: הבוט עונה להם תמיד, גם מחוץ לשעות ולמרות שהם ברשימת ההתעלמות
+  BOT_ALWAYS_ON,           // "true" = מבטל את הגבלת השעות
+  FORWARD_WHEN_SILENT = 'true', // מחוץ לשעות: להעביר אליך את ההודעות (כשהבוט על מספר API בלבד)
 } = process.env;
+
+const toSet = (str) => new Set(String(str).split(/[\s,;]+/).map(normNum).filter(Boolean));
+const IGNORE_ENV = toSet(IGNORE_NUMBERS);
+const TEST_SET = toSet(TEST_NUMBERS);
 
 const WA_API = `https://graph.facebook.com/v20.0/${PHONE_ID}/messages`;
 const STATE_FILE = process.env.STATE_FILE || './state.json';
@@ -27,7 +36,7 @@ for (const [k, v] of Object.entries({ TOKEN, PHONE_ID, VERIFY_TOKEN, OWNER_NUMBE
 if (!APP_SECRET) console.warn('⚠️  APP_SECRET לא מוגדר - חתימות ה-webhook לא נבדקות');
 
 // ---------- שמירת מצב ----------
-let db = { clients: {}, pauses: {}, fwd: {}, fwdKeys: [] };
+let db = { clients: {}, pauses: {}, fwd: {}, fwdKeys: [], ignore: {} };
 try { db = { ...db, ...JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) }; } catch {}
 let saveTimer;
 function save() {
@@ -155,6 +164,12 @@ function isPaused(from) {
   return true;
 }
 function pause(from) { db.pauses[from] = Date.now() + PAUSE_MS; save(); }
+
+// פקודות בעלים (db.ignore) גוברות על הרשימה ממשתנה הסביבה
+function isIgnored(from) {
+  if (db.ignore[from] === false) return false;
+  return db.ignore[from] === true || IGNORE_ENV.has(from);
+}
 
 // ---------- זיהוי ברכה ----------
 const GREET = new Set([
@@ -318,6 +333,20 @@ async function handleOwner(msg) {
     return;
   }
 
+  // ניהול רשימת ההתעלמות: "התעלם 0521234567 0541234567" / "אל תתעלם 0521234567"
+  let cmd = text.match(/^(אל תתעלם|תתעלם|התעלם)\s+([\s\S]+)/);
+  if (cmd) {
+    const nums = cmd[2].split(/[\s,;]+/).map(normNum).filter(Boolean);
+    const on = cmd[1] === 'התעלם' || cmd[1] === 'תתעלם';
+    nums.forEach((n) => { db.ignore[n] = on; });
+    save();
+    return send(OWNER_NUMBER, { type: 'text', text: { body: nums.length ? `${on ? '🔇 הבוט יתעלם' : '🔊 הבוט יענה'}: ${nums.length} מספרים` : 'לא זיהיתי מספרים' } });
+  }
+  if (/^(סטטוס|status)$/i.test(text)) {
+    const active = BOT_ALWAYS_ON === 'true' || isActive();
+    return send(OWNER_NUMBER, { type: 'text', text: { body: `${active ? '🟢 הבוט פעיל עכשיו' : '🔴 הבוט שותק עכשיו (מחוץ לשעות)'}\n🔇 ברשימת התעלמות: ${IGNORE_ENV.size} מספרים` } });
+  }
+
   // גיבוי: 972XXXXXXXXX הודעה
   let m = text.match(/^(972\d{9,12})\s+([\s\S]+)/);
   if (m) { await sendText(m[1], m[2]); pause(m[1]); return; }
@@ -328,7 +357,7 @@ async function handleOwner(msg) {
   }
   return send(OWNER_NUMBER, {
     type: 'text',
-    text: { body: 'כדי לענות ללקוח: החזק את ההודעה שהבוט העביר אליך ← השב.\nהבוט ישתוק ללקוח הזה 6 שעות.\nבתשובה "resume" הבוט חוזר לעבוד לו, ו"pause" משתיק אותו.' },
+    text: { body: 'כדי לענות ללקוח: החזק את ההודעה שהבוט העביר אליך ← השב.\nהבוט ישתוק ללקוח הזה 6 שעות.\nבתשובה "resume" הבוט חוזר לעבוד לו, ו"pause" משתיק אותו.\n\nהתעלם 0521234567 - הבוט לא יענה למספר הזה\nאל תתעלם 0521234567 - מבטל\nסטטוס - האם הבוט פעיל עכשיו' },
   });
 }
 
@@ -338,7 +367,10 @@ async function handle(msg, profileName) {
   if (isDuplicate(msg.id)) return;
   markRead(msg.id);
 
-  if (from === OWNER_NUMBER) return handleOwner(msg);
+  // OWNER_TEST_MODE=true: אתה מתנסה כלקוח מהמספר שלך (לבדיקות בלבד, לכבות אחר כך)
+  if (from === OWNER_NUMBER && process.env.OWNER_TEST_MODE !== 'true') return handleOwner(msg);
+  const testing = TEST_SET.has(from);
+  if (!testing && isIgnored(from)) return; // איש קשר שלך: הבוט לא מתערב
   if (rateLimited(from)) return;
 
   const c = (db.clients[from] ||= { gender: null, askedGender: false, hist: [] });
@@ -351,6 +383,12 @@ async function handle(msg, profileName) {
   // אסא מטפל בלקוח: הבוט שותק, וכל מה שהלקוח כותב מועבר אליך
   if (isPaused(from)) {
     if (!btn && (text || msg.type !== 'reaction')) await forwardToOwner(from, c, '💬', msg);
+    return;
+  }
+
+  // מחוץ לשעות הפעילות: הבוט שותק ואתה עונה
+  if (!testing && BOT_ALWAYS_ON !== 'true' && !isActive()) {
+    if (FORWARD_WHEN_SILENT === 'true' && !btn && (text || msg.type !== 'reaction')) await forwardToOwner(from, c, '🌙 מחוץ לשעות הבוט', msg);
     return;
   }
 
